@@ -305,17 +305,23 @@ async def main():
         n = await fetch_and_mark_all_silent()
         await mark_initialized()
         logger.info(f"Marked {n} articles as seen")
-        await bot.send_message(
-            ADMIN_ID,
-            "🤖 <b>Новостной бот запущен!</b>\n\n"
-            f"📋 Дайджест каждые {DIGEST_INTERVAL_MIN} мин\n"
-            f"🚨 Breaking каждые {BREAKING_CHECK_MIN} мин\n\n"
-            "Первый дайджест придёт через несколько минут.\n"
-            "/help — команды  |  /users — список юзеров",
-            parse_mode="HTML",
-        )
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                "🤖 <b>Новостной бот запущен!</b>\n\n"
+                f"📋 Дайджест каждые {DIGEST_INTERVAL_MIN} мин\n"
+                f"🚨 Breaking каждые {BREAKING_CHECK_MIN} мин\n\n"
+                "Первый дайджест придёт через несколько минут.\n"
+                "/help — команды  |  /users — список юзеров",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning(f"Could not notify admin on first run: {e}")
     else:
-        await bot.send_message(ADMIN_ID, "♻️ Бот перезапущен")
+        try:
+            await bot.send_message(ADMIN_ID, "♻️ Бот перезапущен")
+        except Exception as e:
+            logger.warning(f"Could not notify admin on restart: {e}")
 
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(job_digest,  "interval", minutes=DIGEST_INTERVAL_MIN, id="digest")
