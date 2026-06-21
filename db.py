@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import List, Tuple, Optional
 
-DB_PATH = "news_bot.db"
+DB_PATH = "/data/news_bot.db"
 logger = logging.getLogger(__name__)
 
 
