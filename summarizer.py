@@ -48,19 +48,14 @@ async def create_digest(articles_by_category: Dict[str, List[dict]]) -> str:
 {articles_text}
 """
 
-    try:
-        resp = await client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1500,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        digest = resp.content[0].text.strip()
-        header = f"📰 <b>ДАЙДЖЕСТ</b>  ·  {total} статей\n{'─' * 22}\n\n"
-        return header + digest
-
-    except Exception as e:
-        logger.error(f"Digest error: {e}")
-        return ""
+    resp = await client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1500,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    digest = resp.content[0].text.strip()
+    header = f"📰 <b>ДАЙДЖЕСТ</b>  ·  {total} статей\n{'─' * 22}\n\n"
+    return header + digest
 
 
 async def create_breaking_summary(breaking: List[dict]) -> str:
@@ -80,14 +75,9 @@ async def create_breaking_summary(breaking: List[dict]) -> str:
 {articles_text}
 """
 
-    try:
-        resp = await client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=300,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return resp.content[0].text.strip()
-
-    except Exception as e:
-        logger.error(f"Breaking summary error: {e}")
-        return ""
+    resp = await client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=300,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return resp.content[0].text.strip()
