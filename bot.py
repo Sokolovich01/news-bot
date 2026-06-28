@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import Command
@@ -10,7 +12,8 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import TELEGRAM_TOKEN, ADMIN_ID, DIGEST_INTERVAL_MIN, BREAKING_CHECK_MIN
+from config import TELEGRAM_TOKEN, ADMIN_ID, DIGEST_INTERVAL_MIN, BREAKING_CHECK_MIN, \
+    BOT_TIMEZONE, QUIET_START, QUIET_END
 from db import (
     init_db, is_paused, set_paused, cleanup_old,
     is_initialized, mark_initialized,
@@ -47,11 +50,24 @@ async def broadcast(text: str):
             logger.warning(f"Failed to send to {uid}: {e}")
 
 
+# ── Quiet hours ───────────────────────────────────────────────────────────────
+
+def _is_quiet_time() -> bool:
+    """True if current local time is in the silent window (QUIET_START–QUIET_END)."""
+    now_h = datetime.now(ZoneInfo(BOT_TIMEZONE)).hour
+    if QUIET_START < QUIET_END:
+        return QUIET_START <= now_h < QUIET_END
+    return now_h >= QUIET_START or now_h < QUIET_END  # wraps midnight
+
+
 # ── Scheduled jobs ────────────────────────────────────────────────────────────
 
 async def job_digest():
     if await is_paused():
         return
+    if _is_quiet_time():
+        logger.info("Digest skipped (quiet hours) — articles accumulating")
+        return          # статьи НЕ помечаются seen → накапливаются до 07:00
     try:
         articles = await fetch_for_digest()
         if not articles:
@@ -69,6 +85,8 @@ async def job_digest():
 async def job_breaking():
     if await is_paused():
         return
+    if _is_quiet_time():
+        return          # ночью срочные тоже молчат
     try:
         breaking = await fetch_breaking_only()
         if not breaking:
@@ -336,23 +354,17 @@ async def main():
         n = await fetch_and_mark_all_silent()
         await mark_initialized()
         logger.info(f"Marked {n} articles as seen")
-        try:
-            await bot.send_message(
-                ADMIN_ID,
-                "🤖 <b>Новостной бот запущен!</b>\n\n"
-                f"📋 Дайджест каждые {DIGEST_INTERVAL_MIN} мин\n"
-                f"🚨 Breaking каждые {BREAKING_CHECK_MIN} мин\n\n"
-                "Первый дайджест придёт через несколько минут.\n"
-                "/help — команды  |  /users — список юзеров",
-                parse_mode="HTML",
-            )
-        except Exception as e:
-            logger.warning(f"Could not notify admin on first run: {e}")
+        await bot.send_message(
+            ADMIN_ID,
+            "🤖 <b>Новостной бот запущен!</b>\n\n"
+            f"📋 Дайджест каждые {DIGEST_INTERVAL_MIN} мин\n"
+            f"🚨 Breaking каждые {BREAKING_CHECK_MIN} мин\n\n"
+            "Первый дайджест придёт через несколько минут.\n"
+            "/help — команды  |  /users — список юзеров",
+            parse_mode="HTML",
+        )
     else:
-        try:
-            await bot.send_message(ADMIN_ID, "♻️ Бот перезапущен")
-        except Exception as e:
-            logger.warning(f"Could not notify admin on restart: {e}")
+        await bot.send_message(ADMIN_ID, "♻️ Бот перезапущен")
 
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(job_digest,  "interval", minutes=DIGEST_INTERVAL_MIN, id="digest")

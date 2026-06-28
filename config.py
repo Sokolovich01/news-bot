@@ -10,6 +10,11 @@ ADMIN_ID        = int(os.getenv("ADMIN_ID", "0"))   # Твой chat_id — гл�
 DIGEST_INTERVAL_MIN  = 7
 BREAKING_CHECK_MIN   = 2
 
+# Тихий режим: не отправлять ничего с QUIET_START до QUIET_END (по местному времени)
+BOT_TIMEZONE  = "Europe/Kyiv"
+QUIET_START   = 0   # 00:00 — начало тишины
+QUIET_END     = 7   # 07:00 — конец тишины (статьи копятся, в 7 утра уходит большой дайджест)
+
 BREAKING_KEYWORDS = [
     "breaking", "urgent", "alert", "explosion", "killed", "attack",
     "nuclear", "earthquake", "crash", "dead", "ceasefire", "strike",
