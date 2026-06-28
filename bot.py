@@ -180,15 +180,46 @@ async def cb_reject(call: CallbackQuery):
 @router.message(Command("digest"))
 async def cmd_digest(msg: Message):
     if not await is_authorized(msg.chat.id): return
-    await msg.answer("🔄 Собираю дайджест...")
-    await job_digest()
+    wait_msg = await msg.answer("🔄 Собираю дайджест...")
+    try:
+        articles = await fetch_for_digest()
+        if not articles:
+            await wait_msg.edit_text(
+                "📭 Нет новых статей.\n"
+                f"Следующий автодайджест — через ~{DIGEST_INTERVAL_MIN} мин."
+            )
+            return
+        count = sum(len(v) for v in articles.values())
+        logger.info(f"Manual /digest: {count} articles")
+        digest = await create_digest(articles)
+        if digest:
+            await wait_msg.delete()
+            await broadcast(digest)
+        else:
+            await wait_msg.edit_text("❌ Не удалось создать дайджест (ошибка ИИ)")
+    except Exception as e:
+        logger.error(f"cmd_digest error: {e}")
+        await wait_msg.edit_text(f"❌ Ошибка: {e}")
 
 
 @router.message(Command("breaking"))
 async def cmd_breaking(msg: Message):
     if not await is_authorized(msg.chat.id): return
-    await msg.answer("🔄 Проверяю срочные...")
-    await job_breaking()
+    wait_msg = await msg.answer("🔄 Проверяю срочные...")
+    try:
+        breaking = await fetch_breaking_only()
+        if not breaking:
+            await wait_msg.edit_text("✅ Срочных новостей сейчас нет")
+            return
+        summary = await create_breaking_summary(breaking)
+        if summary:
+            await wait_msg.delete()
+            await broadcast(summary)
+        else:
+            await wait_msg.edit_text("❌ Не удалось создать сводку (ошибка ИИ)")
+    except Exception as e:
+        logger.error(f"cmd_breaking error: {e}")
+        await wait_msg.edit_text(f"❌ Ошибка: {e}")
 
 
 @router.message(Command("help"))
