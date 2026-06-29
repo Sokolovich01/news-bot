@@ -7,13 +7,25 @@ TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN")
 ANTHROPIC_KEY   = os.getenv("ANTHROPIC_API_KEY")
 ADMIN_ID        = int(os.getenv("ADMIN_ID", "0"))   # Твой chat_id — главный
 
-DIGEST_INTERVAL_MIN  = 7
-BREAKING_CHECK_MIN   = 2
+DIGEST_INTERVAL_MIN  = 60   # дайджест раз в час
+BREAKING_CHECK_MIN   = 10   # проверка срочных каждые 10 мин
+MIN_ARTICLES_SOLO    = 3    # минимум статей чтобы категория шла отдельным сообщением
 
 # Тихий режим: не отправлять ничего с QUIET_START до QUIET_END (по местному времени)
 BOT_TIMEZONE  = "Europe/Kyiv"
 QUIET_START   = 0   # 00:00 — начало тишины
 QUIET_END     = 7   # 07:00 — конец тишины (статьи копятся, в 7 утра уходит большой дайджест)
+
+CATEGORY_HASHTAGS = {
+    "🌍 МИР":        "#МИР #Новости #Мировые",
+    "🇺🇦 УКРАИНА":   "#Украина #Война #ЗСУ #Ukraine",
+    "🇪🇺 ЕВРОПА":    "#Европа #ЕС #Политика #EU",
+    "🇺🇸 США":       "#США #Политика #US",
+    "💻 ТЕХНОЛОГИИ": "#Технологии #AI #Tech #Инновации",
+    "🚗 АВТО":       "#Авто #Машины #EV #Электрокары",
+    "💰 ФИНАНСЫ":    "#Финансы #Рынки #Экономика",
+    "🏙️ КОНОТОП":   "#Конотоп #Сумщина #УкраинаЖивет",
+}
 
 BREAKING_KEYWORDS = [
     "breaking", "urgent", "alert", "explosion", "killed", "attack",
@@ -59,5 +71,8 @@ SOURCES = {
     "💰 ФИНАНСЫ": [
         ("Reuters Business","https://feeds.reuters.com/reuters/businessNews"),
         ("CNBC",            "https://www.cnbc.com/id/100003114/device/rss/rss.html"),
+    ],
+    "🏙️ КОНОТОП": [
+        ("Інша думка", "https://rsshub.app/telegram/channel/inshadumka"),
     ],
 }

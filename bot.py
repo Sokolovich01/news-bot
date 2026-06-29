@@ -1,19 +1,20 @@
 import asyncio
 import logging
 from datetime import datetime
+from typing import Dict, List
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import Command
-from aiogram.types import (
-    Message, CallbackQuery,
-    InlineKeyboardMarkup, InlineKeyboardButton,
-)
+from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import TELEGRAM_TOKEN, ADMIN_ID, DIGEST_INTERVAL_MIN, BREAKING_CHECK_MIN, \
-    BOT_TIMEZONE, QUIET_START, QUIET_END
+from config import (
+    TELEGRAM_TOKEN, ADMIN_ID,
+    DIGEST_INTERVAL_MIN, BREAKING_CHECK_MIN,
+    BOT_TIMEZONE, QUIET_START, QUIET_END,
+)
 from db import (
     init_db, is_paused, set_paused, cleanup_old,
     is_initialized, mark_initialized,
@@ -21,7 +22,7 @@ from db import (
     get_all_users, user_exists, set_user_language, get_user_language,
 )
 from aggregator import fetch_for_digest, fetch_breaking_only, fetch_and_mark_all_silent
-from summarizer import create_digest, create_breaking_summary
+from summarizer import create_split_digests, create_breaking_summary
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,16 +36,49 @@ router = Router()
 dp.include_router(router)
 
 
-# ── Broadcast helper ─────────────────────────────────────────────────────────
+# ── Quiet hours ───────────────────────────────────────────────────────────────
 
-async def broadcast(texts: dict):
+def _is_quiet_time() -> bool:
+    now_h = datetime.now(ZoneInfo(BOT_TIMEZONE)).hour
+    if QUIET_START < QUIET_END:
+        return QUIET_START <= now_h < QUIET_END
+    return now_h >= QUIET_START or now_h < QUIET_END
+
+
+# ── Broadcast helpers ─────────────────────────────────────────────────────────
+
+async def broadcast_many(messages_by_lang: Dict[str, List[str]]):
     """
-    Send per-language messages to all active users.
-    texts = {'ru': '...', 'uk': '...'} — fallback to 'ru' if user's lang not in texts.
+    Send per-language list of messages to active users.
+    messages_by_lang = {'ru': ['msg1', 'msg2'], 'uk': ['msg1', 'msg2']}
+    Each message is sent separately with 1s delay between them.
     """
+    if not messages_by_lang:
+        return
     users_by_lang = await get_active_users_by_lang()
     for lang, uids in users_by_lang.items():
-        text = texts.get(lang) or texts.get("ru", "")
+        messages = messages_by_lang.get(lang) or messages_by_lang.get("ru", [])
+        if not messages:
+            continue
+        for uid in uids:
+            for i, text in enumerate(messages):
+                try:
+                    await bot.send_message(
+                        uid, text,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
+                    if i < len(messages) - 1:
+                        await asyncio.sleep(1)
+                except Exception as e:
+                    logger.warning(f"Failed to send to {uid}: {e}")
+
+
+async def broadcast_one(texts_by_lang: Dict[str, str]):
+    """Send single message per language to active users."""
+    users_by_lang = await get_active_users_by_lang()
+    for lang, uids in users_by_lang.items():
+        text = texts_by_lang.get(lang) or texts_by_lang.get("ru", "")
         if not text:
             continue
         for uid in uids:
@@ -56,16 +90,6 @@ async def broadcast(texts: dict):
                 )
             except Exception as e:
                 logger.warning(f"Failed to send to {uid}: {e}")
-
-
-# ── Quiet hours ───────────────────────────────────────────────────────────────
-
-def _is_quiet_time() -> bool:
-    """True if current local time is in the silent window (QUIET_START–QUIET_END)."""
-    now_h = datetime.now(ZoneInfo(BOT_TIMEZONE)).hour
-    if QUIET_START < QUIET_END:
-        return QUIET_START <= now_h < QUIET_END
-    return now_h >= QUIET_START or now_h < QUIET_END  # wraps midnight
 
 
 # ── Scheduled jobs ────────────────────────────────────────────────────────────
@@ -81,15 +105,16 @@ async def job_digest():
         if not articles:
             logger.info("Digest: no new articles")
             return
-        count = sum(len(v) for v in articles.values())
-        logger.info(f"Digest: {count} articles")
-        # Generate digest for each language that has active users
+        total = sum(len(v) for v in articles.values())
+        logger.info(f"Digest: {total} articles → splitting by category")
+
         users_by_lang = await get_active_users_by_lang()
-        texts = {}
+        msgs_by_lang: Dict[str, List[str]] = {}
         for lang in users_by_lang:
-            texts[lang] = await create_digest(articles, lang)
-        if any(texts.values()):
-            await broadcast(texts)
+            msgs_by_lang[lang] = await create_split_digests(articles, lang)
+
+        if any(msgs_by_lang.values()):
+            await broadcast_many(msgs_by_lang)
     except Exception as e:
         logger.error(f"job_digest error: {e}")
 
@@ -105,11 +130,11 @@ async def job_breaking():
             return
         logger.info(f"Breaking: {len(breaking)} articles")
         users_by_lang = await get_active_users_by_lang()
-        texts = {}
+        texts: Dict[str, str] = {}
         for lang in users_by_lang:
             texts[lang] = await create_breaking_summary(breaking, lang)
         if any(texts.values()):
-            await broadcast(texts)
+            await broadcast_one(texts)
     except Exception as e:
         logger.error(f"job_breaking error: {e}")
 
@@ -136,15 +161,10 @@ async def cmd_start(msg: Message):
     name  = msg.from_user.full_name or "Неизвестный"
     uname = msg.from_user.username or ""
 
-    # Already a user
     if await is_authorized(uid):
-        await msg.answer(
-            "👋 Привет! Ты уже подключён к боту.\n\n"
-            "/help — список команд",
-        )
+        await msg.answer("👋 Привет! Ты уже подключён к боту.\n\n/help — список команд")
         return
 
-    # Unknown person → notify admin
     await msg.answer(
         "👋 Привет!\n"
         "У тебя пока нет доступа. Запрос отправлен администратору.\n"
@@ -177,17 +197,18 @@ async def cb_approve(call: CallbackQuery):
 
     _, uid_str, *name_parts = call.data.split(":")
     uid  = int(uid_str)
-    name = ":".join(name_parts)  # name might have colons
+    name = ":".join(name_parts)
 
     await add_user(uid, name)
     await call.message.edit_text(
-        call.message.text + f"\n\n✅ <b>Одобрен</b>", parse_mode="HTML"
+        call.message.text + "\n\n✅ <b>Одобрен</b>", parse_mode="HTML"
     )
     await bot.send_message(
         uid,
         "✅ Доступ одобрен! Добро пожаловать.\n\n"
-        "Ты будешь получать дайджест каждые 7 минут.\n"
-        "/help — список команд",
+        f"Дайджест приходит раз в час по категориям.\n"
+        "/lang — выбрать язык 🇷🇺🇺🇦\n"
+        "/help — все команды",
     )
     await call.answer("Одобрено")
 
@@ -208,14 +229,14 @@ async def cb_reject(call: CallbackQuery):
     await call.answer("Отклонено")
 
 
-# ── User commands ─────────────────────────────────────────────────────────────
+# ── /lang ─────────────────────────────────────────────────────────────────────
 
 @router.message(Command("lang"))
 async def cmd_lang(msg: Message):
     if not await is_authorized(msg.chat.id): return
     kb = InlineKeyboardBuilder()
-    kb.button(text="🇷🇺 Русский",      callback_data="setlang:ru")
-    kb.button(text="🇺🇦 Українська",   callback_data="setlang:uk")
+    kb.button(text="🇷🇺 Русский",    callback_data="setlang:ru")
+    kb.button(text="🇺🇦 Українська", callback_data="setlang:uk")
     kb.adjust(2)
     await msg.answer("Выбери язык дайджеста / Обери мову дайджесту:", reply_markup=kb.as_markup())
 
@@ -232,6 +253,8 @@ async def cb_setlang(call: CallbackQuery):
     await call.answer()
 
 
+# ── User commands ─────────────────────────────────────────────────────────────
+
 @router.message(Command("digest"))
 async def cmd_digest(msg: Message):
     if not await is_authorized(msg.chat.id): return
@@ -244,15 +267,15 @@ async def cmd_digest(msg: Message):
                 f"Следующий автодайджест — через ~{DIGEST_INTERVAL_MIN} мин."
             )
             return
-        count = sum(len(v) for v in articles.values())
-        logger.info(f"Manual /digest: {count} articles")
+        total = sum(len(v) for v in articles.values())
+        logger.info(f"Manual /digest: {total} articles")
         users_by_lang = await get_active_users_by_lang()
-        texts = {}
+        msgs_by_lang: Dict[str, List[str]] = {}
         for lang in users_by_lang:
-            texts[lang] = await create_digest(articles, lang)
-        if any(texts.values()):
+            msgs_by_lang[lang] = await create_split_digests(articles, lang)
+        if any(msgs_by_lang.values()):
             await wait_msg.delete()
-            await broadcast(texts)
+            await broadcast_many(msgs_by_lang)
         else:
             await wait_msg.edit_text("❌ Не удалось создать дайджест (ошибка ИИ)")
     except Exception as e:
@@ -270,12 +293,12 @@ async def cmd_breaking(msg: Message):
             await wait_msg.edit_text("✅ Срочных новостей нет / Термінових новин немає")
             return
         users_by_lang = await get_active_users_by_lang()
-        texts = {}
+        texts: Dict[str, str] = {}
         for lang in users_by_lang:
             texts[lang] = await create_breaking_summary(breaking, lang)
         if any(texts.values()):
             await wait_msg.delete()
-            await broadcast(texts)
+            await broadcast_one(texts)
         else:
             await wait_msg.edit_text("❌ Не удалось создать сводку (ошибка ИИ)")
     except Exception as e:
@@ -315,7 +338,6 @@ async def cmd_users(msg: Message):
     if not users:
         await msg.answer("Пользователей нет")
         return
-
     lines = ["👥 <b>Пользователи:</b>\n"]
     for u in users:
         status = "✅" if u["is_active"] else "❌"
@@ -379,52 +401,17 @@ async def cmd_status(msg: Message):
         f"{status}\n"
         f"👥 Пользователей: {len(users)}\n"
         f"📋 Дайджест: каждые {DIGEST_INTERVAL_MIN} мин\n"
-        f"🚨 Breaking: каждые {BREAKING_CHECK_MIN} мин",
+        f"🚨 Breaking: каждые {BREAKING_CHECK_MIN} мин\n"
+        f"🌙 Тихий режим: 00:00–07:00 (Киев)",
         parse_mode="HTML",
     )
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
 
-async def main():
-    await init_db()
-
-    # Ensure admin is always in the users table
-    from db import add_user as _add
-    await _add(ADMIN_ID, "Admin")
-
-    if not await is_initialized():
-        logger.info("First run — marking existing articles as seen")
-        n = await fetch_and_mark_all_silent()
-        await mark_initialized()
-        logger.info(f"Marked {n} articles as seen")
-        await bot.send_message(
-            ADMIN_ID,
-            "🤖 <b>Новостной бот запущен!</b>\n\n"
-            f"📋 Дайджест каждые {DIGEST_INTERVAL_MIN} мин\n"
-            f"🚨 Breaking каждые {BREAKING_CHECK_MIN} мин\n\n"
-            "Первый дайджест придёт через несколько минут.\n"
-            "/help — команды  |  /users — список юзеров",
-            parse_mode="HTML",
-        )
-    else:
-        await bot.send_message(ADMIN_ID, "♻️ Бот перезапущен")
-
-    scheduler = AsyncIOScheduler(timezone="UTC")
-    scheduler.add_job(job_digest,  "interval", minutes=DIGEST_INTERVAL_MIN, id="digest")
-    scheduler.add_job(job_breaking,"interval", minutes=BREAKING_CHECK_MIN,  id="breaking")
-    scheduler.add_job(job_cleanup, "cron",     hour=4, minute=0,            id="cleanup")
-    scheduler.start()
-
-    logger.info("Bot started — entering manual poll loop")
-    # dp.start_polling() crashes on Railway (SIGTERM handler kills loop after 31s)
-    # Manual loop is stable
-    await _raw_poll(bot, dp)
-
-
 async def _raw_poll(bot: Bot, dp: Dispatcher):
+    """Manual polling loop — stable on Railway (no SIGTERM crash after 31s)."""
     offset = None
-    # Skip old updates on startup
     try:
         updates = await bot.get_updates(timeout=0)
         if updates:
@@ -442,6 +429,46 @@ async def _raw_poll(bot: Bot, dp: Dispatcher):
         except Exception as e:
             logger.error(f"Poll error: {e}")
             await asyncio.sleep(5)
+
+
+async def main():
+    await init_db()
+
+    from db import add_user as _add
+    await _add(ADMIN_ID, "Admin")
+
+    if not await is_initialized():
+        logger.info("First run — marking existing articles as seen")
+        n = await fetch_and_mark_all_silent()
+        await mark_initialized()
+        logger.info(f"Marked {n} articles as seen")
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                "🤖 <b>Новостной бот запущен!</b>\n\n"
+                f"📋 Дайджест раз в час — по категориям\n"
+                f"🚨 Breaking каждые {BREAKING_CHECK_MIN} мин\n"
+                f"🌙 Тихий режим: 00:00–07:00 (Киев)\n\n"
+                "Первый дайджест придёт через час.\n"
+                "/help — команды  |  /lang — язык 🇷🇺🇺🇦",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning(f"Could not notify admin: {e}")
+    else:
+        try:
+            await bot.send_message(ADMIN_ID, "♻️ Бот перезапущен")
+        except Exception as e:
+            logger.warning(f"Could not notify admin: {e}")
+
+    scheduler = AsyncIOScheduler(timezone="UTC")
+    scheduler.add_job(job_digest,  "interval", minutes=DIGEST_INTERVAL_MIN, id="digest")
+    scheduler.add_job(job_breaking,"interval", minutes=BREAKING_CHECK_MIN,  id="breaking")
+    scheduler.add_job(job_cleanup, "cron",     hour=4, minute=0,            id="cleanup")
+    scheduler.start()
+
+    logger.info(f"Bot started | digest={DIGEST_INTERVAL_MIN}m | breaking={BREAKING_CHECK_MIN}m | quiet={QUIET_START}-{QUIET_END}h")
+    await _raw_poll(bot, dp)
 
 
 if __name__ == "__main__":
