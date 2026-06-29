@@ -313,6 +313,7 @@ async def cmd_help(msg: Message):
     if is_admin(msg.chat.id):
         admin_section = (
             "\n\n👑 <b>Админ:</b>\n"
+            "/adduser <code>ID Имя</code> — добавить\n"
             "/users — список пользователей\n"
             "/removeuser <code>ID</code> — удалить\n"
             "/pause 2h — пауза для всех\n"
@@ -347,6 +348,35 @@ async def cmd_users(msg: Message):
             f"   <code>{u['chat_id']}</code> · {u['added_at'][:10]}"
         )
     await msg.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("adduser"))
+async def cmd_adduser(msg: Message):
+    if not is_admin(msg.chat.id): return
+    parts = msg.text.split(maxsplit=2)
+    if len(parts) < 2:
+        await msg.answer(
+            "Использование: /adduser <code>chat_id Имя</code>\n"
+            "Имя необязательно.", parse_mode="HTML"
+        )
+        return
+    try:
+        uid  = int(parts[1])
+        name = parts[2] if len(parts) > 2 else f"User {uid}"
+        await add_user(uid, name)
+        await msg.answer(f"✅ <b>{name}</b> (<code>{uid}</code>) добавлен", parse_mode="HTML")
+        try:
+            await bot.send_message(
+                uid,
+                "✅ Тебя добавили в новостной бот!\n\n"
+                "Дайджест приходит раз в час по категориям.\n"
+                "/lang — выбрать язык 🇷🇺🇺🇦\n"
+                "/help — все команды",
+            )
+        except Exception:
+            pass  # пользователь ещё не написал боту — это ок
+    except (ValueError, Exception) as e:
+        await msg.answer(f"Ошибка: {e}")
 
 
 @router.message(Command("removeuser"))
