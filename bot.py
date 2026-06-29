@@ -17,7 +17,8 @@ from config import TELEGRAM_TOKEN, ADMIN_ID, DIGEST_INTERVAL_MIN, BREAKING_CHECK
 from db import (
     init_db, is_paused, set_paused, cleanup_old,
     is_initialized, mark_initialized,
-    add_user, remove_user, get_active_users, get_all_users, user_exists,
+    add_user, remove_user, get_active_users, get_active_users_by_lang,
+    get_all_users, user_exists, set_user_language, get_user_language,
 )
 from aggregator import fetch_for_digest, fetch_breaking_only, fetch_and_mark_all_silent
 from summarizer import create_digest, create_breaking_summary
@@ -36,18 +37,25 @@ dp.include_router(router)
 
 # ── Broadcast helper ─────────────────────────────────────────────────────────
 
-async def broadcast(text: str):
-    """Send message to all active users. Silently skips blocked/deactivated."""
-    users = await get_active_users()
-    for uid in users:
-        try:
-            await bot.send_message(
-                uid, text,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-        except Exception as e:
-            logger.warning(f"Failed to send to {uid}: {e}")
+async def broadcast(texts: dict):
+    """
+    Send per-language messages to all active users.
+    texts = {'ru': '...', 'uk': '...'} — fallback to 'ru' if user's lang not in texts.
+    """
+    users_by_lang = await get_active_users_by_lang()
+    for lang, uids in users_by_lang.items():
+        text = texts.get(lang) or texts.get("ru", "")
+        if not text:
+            continue
+        for uid in uids:
+            try:
+                await bot.send_message(
+                    uid, text,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send to {uid}: {e}")
 
 
 # ── Quiet hours ───────────────────────────────────────────────────────────────
@@ -67,17 +75,21 @@ async def job_digest():
         return
     if _is_quiet_time():
         logger.info("Digest skipped (quiet hours) — articles accumulating")
-        return          # статьи НЕ помечаются seen → накапливаются до 07:00
+        return
     try:
         articles = await fetch_for_digest()
         if not articles:
             logger.info("Digest: no new articles")
             return
         count = sum(len(v) for v in articles.values())
-        logger.info(f"Digest: {count} articles → {len(await get_active_users())} users")
-        digest = await create_digest(articles)
-        if digest:
-            await broadcast(digest)
+        logger.info(f"Digest: {count} articles")
+        # Generate digest for each language that has active users
+        users_by_lang = await get_active_users_by_lang()
+        texts = {}
+        for lang in users_by_lang:
+            texts[lang] = await create_digest(articles, lang)
+        if any(texts.values()):
+            await broadcast(texts)
     except Exception as e:
         logger.error(f"job_digest error: {e}")
 
@@ -86,15 +98,18 @@ async def job_breaking():
     if await is_paused():
         return
     if _is_quiet_time():
-        return          # ночью срочные тоже молчат
+        return
     try:
         breaking = await fetch_breaking_only()
         if not breaking:
             return
         logger.info(f"Breaking: {len(breaking)} articles")
-        msg = await create_breaking_summary(breaking)
-        if msg:
-            await broadcast(msg)
+        users_by_lang = await get_active_users_by_lang()
+        texts = {}
+        for lang in users_by_lang:
+            texts[lang] = await create_breaking_summary(breaking, lang)
+        if any(texts.values()):
+            await broadcast(texts)
     except Exception as e:
         logger.error(f"job_breaking error: {e}")
 
@@ -195,24 +210,49 @@ async def cb_reject(call: CallbackQuery):
 
 # ── User commands ─────────────────────────────────────────────────────────────
 
+@router.message(Command("lang"))
+async def cmd_lang(msg: Message):
+    if not await is_authorized(msg.chat.id): return
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🇷🇺 Русский",      callback_data="setlang:ru")
+    kb.button(text="🇺🇦 Українська",   callback_data="setlang:uk")
+    kb.adjust(2)
+    await msg.answer("Выбери язык дайджеста / Обери мову дайджесту:", reply_markup=kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("setlang:"))
+async def cb_setlang(call: CallbackQuery):
+    if not await is_authorized(call.from_user.id):
+        await call.answer("Нет доступа")
+        return
+    lang = call.data.split(":")[1]
+    await set_user_language(call.from_user.id, lang)
+    labels = {"ru": "🇷🇺 Русский — сохранено!", "uk": "🇺🇦 Українська — збережено!"}
+    await call.message.edit_text(labels.get(lang, "Сохранено"))
+    await call.answer()
+
+
 @router.message(Command("digest"))
 async def cmd_digest(msg: Message):
     if not await is_authorized(msg.chat.id): return
-    wait_msg = await msg.answer("🔄 Собираю дайджест...")
+    wait_msg = await msg.answer("🔄 Збираю дайджест... / Собираю дайджест...")
     try:
         articles = await fetch_for_digest()
         if not articles:
             await wait_msg.edit_text(
-                "📭 Нет новых статей.\n"
+                f"📭 Нет новых статей / Немає нових статей.\n"
                 f"Следующий автодайджест — через ~{DIGEST_INTERVAL_MIN} мин."
             )
             return
         count = sum(len(v) for v in articles.values())
         logger.info(f"Manual /digest: {count} articles")
-        digest = await create_digest(articles)
-        if digest:
+        users_by_lang = await get_active_users_by_lang()
+        texts = {}
+        for lang in users_by_lang:
+            texts[lang] = await create_digest(articles, lang)
+        if any(texts.values()):
             await wait_msg.delete()
-            await broadcast(digest)
+            await broadcast(texts)
         else:
             await wait_msg.edit_text("❌ Не удалось создать дайджест (ошибка ИИ)")
     except Exception as e:
@@ -223,16 +263,19 @@ async def cmd_digest(msg: Message):
 @router.message(Command("breaking"))
 async def cmd_breaking(msg: Message):
     if not await is_authorized(msg.chat.id): return
-    wait_msg = await msg.answer("🔄 Проверяю срочные...")
+    wait_msg = await msg.answer("🔄 Перевіряю термінові... / Проверяю срочные...")
     try:
         breaking = await fetch_breaking_only()
         if not breaking:
-            await wait_msg.edit_text("✅ Срочных новостей сейчас нет")
+            await wait_msg.edit_text("✅ Срочных новостей нет / Термінових новин немає")
             return
-        summary = await create_breaking_summary(breaking)
-        if summary:
+        users_by_lang = await get_active_users_by_lang()
+        texts = {}
+        for lang in users_by_lang:
+            texts[lang] = await create_breaking_summary(breaking, lang)
+        if any(texts.values()):
             await wait_msg.delete()
-            await broadcast(summary)
+            await broadcast(texts)
         else:
             await wait_msg.edit_text("❌ Не удалось создать сводку (ошибка ИИ)")
     except Exception as e:
@@ -254,9 +297,10 @@ async def cmd_help(msg: Message):
             "/status — статус бота"
         )
     await msg.answer(
-        "📋 <b>Команды:</b>\n\n"
+        "📋 <b>Команды / Команди:</b>\n\n"
         "/digest — дайджест прямо сейчас\n"
-        "/breaking — проверить срочные новости"
+        "/breaking — проверить срочные новости\n"
+        "/lang — сменить язык 🇷🇺🇺🇦"
         + admin_section,
         parse_mode="HTML",
     )

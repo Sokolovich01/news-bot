@@ -3,9 +3,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import List, Tuple, Optional
 
-import os
-DB_PATH = "/data/news_bot.db"
-os.makedirs("/data", exist_ok=True)
+DB_PATH = "news_bot.db"
 logger = logging.getLogger(__name__)
 
 
@@ -31,9 +29,16 @@ async def init_db():
                 name      TEXT,
                 username  TEXT,
                 is_active INTEGER DEFAULT 1,
+                language  TEXT DEFAULT 'ru',
                 added_at  TEXT DEFAULT (datetime('now'))
             )
         """)
+        # Migration: add language column if it doesn't exist yet
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN language TEXT DEFAULT 'ru'")
+            await db.commit()
+        except Exception:
+            pass  # column already exists
         await db.execute(
             "INSERT OR IGNORE INTO bot_state (key, value) VALUES ('initialized', 'false')"
         )
@@ -141,6 +146,36 @@ async def get_active_users() -> List[int]:
         ) as cur:
             rows = await cur.fetchall()
             return [row[0] for row in rows]
+
+
+async def get_active_users_by_lang() -> dict:
+    """Returns {lang: [chat_ids]} for all active users."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT chat_id, COALESCE(language, 'ru') FROM users WHERE is_active = 1"
+        ) as cur:
+            rows = await cur.fetchall()
+    result: dict = {}
+    for chat_id, lang in rows:
+        result.setdefault(lang, []).append(chat_id)
+    return result
+
+
+async def set_user_language(chat_id: int, lang: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET language = ? WHERE chat_id = ?", (lang, chat_id)
+        )
+        await db.commit()
+
+
+async def get_user_language(chat_id: int) -> str:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COALESCE(language, 'ru') FROM users WHERE chat_id = ?", (chat_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else "ru"
 
 
 async def get_all_users() -> List[dict]:

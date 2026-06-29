@@ -10,17 +10,21 @@ logger = logging.getLogger(__name__)
 client = AsyncAnthropic(api_key=ANTHROPIC_KEY)
 
 
-async def create_digest(articles_by_category: Dict[str, List[dict]]) -> str:
+LANG_NAMES = {"ru": "русском", "uk": "українській"}
+BREAKING_PREFIX = {"ru": "🚨 СРОЧНО:", "uk": "🚨 ТЕРМІНОВО:"}
+DIGEST_HEADER = {"ru": "ДАЙДЖЕСТ", "uk": "ДАЙДЖЕСТ"}
+
+
+async def create_digest(articles_by_category: Dict[str, List[dict]], lang: str = "ru") -> str:
     """Build AI digest from articles grouped by category."""
     if not articles_by_category:
         return ""
 
-    # Build article list for the prompt
     lines = []
     total = 0
     for cat, arts in articles_by_category.items():
         lines.append(f"\n== {cat} ==")
-        for a in arts[:8]:  # cap per category
+        for a in arts[:8]:
             lines.append(f"[{a['source']}] {a['title']}")
             if a["description"]:
                 lines.append(f"  → {a['description'][:250]}")
@@ -28,23 +32,24 @@ async def create_digest(articles_by_category: Dict[str, List[dict]]) -> str:
 
     articles_text = "\n".join(lines)
     now_utc = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    lang_name = LANG_NAMES.get(lang, "русском")
 
-    prompt = f"""Ты — новостной редактор. Получаешь свежие заголовки из множества источников за последние ~10 минут.
+    prompt = f"""Ти — новинний редактор. Отримуєш свіжі заголовки з багатьох джерел.
 
-Твоя задача — написать **дайджест на русском языке** по следующим правилам:
+Твоє завдання — написати **дайджест {lang_name} мовою** за такими правилами:
 
-1. Оставляй только категории, где есть реальные новости
-2. В каждой категории — 2–4 ключевых пункта (1–2 предложения каждый)
-3. Если несколько источников пишут об одном и том же → объединяй в один пункт
-4. Пиши живо, кратко, по сути — никакой воды
-5. Формат каждой категории:
-   [эмодзи] **НАЗВАНИЕ КАТЕГОРИИ**
+1. Залишай лише категорії з реальними новинами
+2. У кожній категорії — 2–4 ключових пункти (1–2 речення кожен)
+3. Якщо кілька джерел пишуть про одне й те саме → об'єднуй в один пункт
+4. Пиши живо, коротко, по суті — без води
+5. Формат кожної категорії:
+   [емодзі] **НАЗВА КАТЕГОРІЇ**
    • Пункт 1
    • Пункт 2
-6. Ничего не придумывай — только то, что есть в источниках
-7. В самом конце строка: 🕐 {now_utc}
+6. Нічого не вигадуй — лише те, що є в джерелах
+7. В самому кінці рядок: 🕐 {now_utc}
 
-НОВОСТИ:
+НОВИНИ:
 {articles_text}
 """
 
@@ -58,7 +63,7 @@ async def create_digest(articles_by_category: Dict[str, List[dict]]) -> str:
     return header + digest
 
 
-async def create_breaking_summary(breaking: List[dict]) -> str:
+async def create_breaking_summary(breaking: List[dict], lang: str = "ru") -> str:
     """Short breaking-news alert."""
     if not breaking:
         return ""
@@ -68,9 +73,11 @@ async def create_breaking_summary(breaking: List[dict]) -> str:
         for a in breaking[:5]
     ]
     articles_text = "\n".join(lines)
+    lang_name = LANG_NAMES.get(lang, "русском")
+    prefix = BREAKING_PREFIX.get(lang, "🚨 СРОЧНО:")
 
-    prompt = f"""Срочные новости. Напиши ОЧЕНЬ короткий алерт на русском (2–3 предложения максимум).
-Только факты. Начни с "🚨 СРОЧНО:"
+    prompt = f"""Термінові новини. Напиши ДУЖЕ короткий алерт {lang_name} мовою (2–3 речення максимум).
+Лише факти. Почни з "{prefix}"
 
 {articles_text}
 """
