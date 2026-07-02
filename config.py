@@ -64,7 +64,10 @@ SOURCES = {
         # заменено на Guardian World (живой и стабильный фид)
         ("Guardian World",  "https://www.theguardian.com/world/rss"),
         ("BBC World",       "http://feeds.bbci.co.uk/news/world/rss.xml"),
-        ("AP News",         "https://feeds.apnews.com/rss/world-news"),
+        # AP News (feeds.apnews.com) подтверждённо мёртв — /sources показал
+        # "Cannot connect to host feeds.apnews.com:443" на каждой попытке.
+        # Заменено на Sky News World.
+        ("Sky News World",  "https://feeds.skynews.com/feeds/rss/world.xml"),
         ("Al Jazeera",      "https://www.aljazeera.com/xml/rss/all.xml"),
     ],
     "🇺🇦 УКРАИНА": [
@@ -78,7 +81,9 @@ SOURCES = {
         ("DW English",      "https://rss.dw.com/rdf/rss-en-all"),
     ],
     "🇺🇸 США": [
-        ("AP Politics",     "https://feeds.apnews.com/rss/politics"),
+        # AP Politics (feeds.apnews.com) — тот же мёртвый хост, см. комментарий
+        # в 🌍 МИР выше. Заменено на CBS News Politics.
+        ("CBS Politics",    "https://www.cbsnews.com/latest/rss/politics"),
         ("NPR",             "https://feeds.npr.org/1001/rss.xml"),
         ("The Hill",        "https://thehill.com/news/feed/"),
     ],

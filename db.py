@@ -1,9 +1,19 @@
 import aiosqlite
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import List, Tuple, Optional
 
-DB_PATH = "news_bot.db"
+# On Railway a volume is mounted at /data (see README "Хостинг — Railway") —
+# writing the DB there means it survives redeploys. Falls back to a local
+# file for local/dev runs where /data doesn't exist. Without this, EVERY
+# redeploy wiped the users table, which is exactly what happened in
+# production (mom/dad got silently removed after an unrelated code push).
+_DATA_DIR = "/data"
+if os.path.isdir(_DATA_DIR):
+    DB_PATH = os.path.join(_DATA_DIR, "news_bot.db")
+else:
+    DB_PATH = "news_bot.db"
 logger = logging.getLogger(__name__)
 
 

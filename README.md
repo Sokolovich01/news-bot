@@ -38,72 +38,33 @@ Telegram-бот который собирает новости с 22 источ�
 
 ---
 
-## Хостинг — Hetzner CX22 (€3.79/мес)
+## Хостинг — Railway
 
-### Регистрация
-1. Зайди на `hetzner.com` → Cloud → Register
-2. Верифицируй карту (€1 холд, вернётся)
+Бот задеплоен на [Railway](https://railway.com) (проект `divine-love` → сервис `news-bot`), подключён к GitHub-репозиторию `Sokolovich01/news-bot`, ветка `main`. Деплой полностью автоматический: любой push в `main` сразу пересобирает и перезапускает бота (см. `Procfile` / `nixpacks.toml` в корне репо — они и говорят Railway, что и как запускать).
 
-### Создание сервера
-1. Hetzner Console → **New Server**
-2. Локация: **Nuremberg** или **Helsinki**
-3. OS: **Ubuntu 24.04**
-4. Тип: **CX22** (2 vCPU, 4GB RAM)
-5. SSH Key — добавь свой публичный ключ (или используй пароль)
-6. Нажми **Create & Buy**
-7. Запомни IP сервера
+### Первый деплой (если поднимаешь с нуля)
+1. `railway.com` → New Project → **Deploy from GitHub repo**
+2. Выбери репозиторий `Sokolovich01/news-bot`, ветку `main`
+3. Variables → добавь `TELEGRAM_TOKEN`, `ANTHROPIC_API_KEY`, `ADMIN_ID` (значения — см. раздел выше)
+4. Deploy — Railway сам поставит зависимости из `requirements.txt` и запустит `python bot.py`
 
-### Подключение к серверу
+⚠️ **Важно:** сейчас у сервиса НЕТ примонтированного volume — `news_bot.db` лежит в контейнере и стирается на каждом редеплое (это значит, что список одобренных пользователей и история просмотренных статей сбрасываются при каждом обновлении кода). См. раздел «Известная проблема — база стирается при редеплое» ниже.
+
+### Как обновить код
 ```bash
-ssh root@ВАШ_IP
+git clone https://github.com/Sokolovich01/news-bot.git
+cd news-bot
+# внеси правки в .py файлы
+git add -A && git commit -m "описание изменений"
+git push origin main
 ```
+Push в `main` = автодеплой. Прогресс сборки виден в Railway → сервис `news-bot` → вкладка **Deployments**.
 
----
-
-## Установка на сервере
-
-```bash
-# Обновить систему
-apt update && apt upgrade -y
-
-# Установить Python и pip
-apt install python3 python3-pip python3-venv -y
-
-# Создать папку
-mkdir -p /opt/news_bot && cd /opt/news_bot
-
-# Создать виртуальное окружение
-python3 -m venv venv
-source venv/bin/activate
-```
-
----
-
-## Загрузка файлов
-
-**Со своего компьютера** (в новом терминале):
-```bash
-scp news_bot.zip root@ВАШ_IP:/opt/news_bot/
-```
-
-**На сервере:**
-```bash
-cd /opt/news_bot
-apt install unzip -y
-unzip news_bot.zip
-mv news_bot/* .
-rm -rf news_bot news_bot.zip
-```
-
----
-
-## Настройка .env
-
+### Настройка .env (для локального теста перед пушем)
 ```bash
 cp .env.example .env
 nano .env
 ```
-
 Заполни три строки:
 ```
 TELEGRAM_TOKEN=сюда_токен_от_BotFather
@@ -111,67 +72,13 @@ ANTHROPIC_API_KEY=сюда_ключ_от_Anthropic
 ADMIN_ID=сюда_твой_chat_id
 ```
 
-Сохранить в nano: `Ctrl+O` → Enter → `Ctrl+X`
-
----
-
-## Установка зависимостей
-
+Локальный тестовый запуск:
 ```bash
-source venv/bin/activate
+python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-```
-
----
-
-## Тестовый запуск
-
-```bash
 python bot.py
 ```
-
-Если всё ок — в Telegram придёт сообщение "🤖 Новостной бот запущен!".  
-Остановить: `Ctrl+C`
-
----
-
-## Автозапуск (systemd)
-
-Чтобы бот работал всегда — даже после перезагрузки сервера:
-
-```bash
-nano /etc/systemd/system/news_bot.service
-```
-
-Вставить:
-```ini
-[Unit]
-Description=News Telegram Bot
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/news_bot
-ExecStart=/opt/news_bot/venv/bin/python bot.py
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Сохранить: `Ctrl+O` → Enter → `Ctrl+X`
-
-```bash
-# Включить и запустить
-systemctl daemon-reload
-systemctl enable news_bot
-systemctl start news_bot
-
-# Проверить статус
-systemctl status news_bot
-```
+Если всё ок — в Telegram придёт сообщение "🤖 Новостной бот запущен!". Остановить: `Ctrl+C`
 
 ---
 
@@ -201,21 +108,15 @@ systemctl status news_bot
 
 ---
 
-## Полезные команды на сервере
+## Полезные действия на Railway
 
-```bash
-# Посмотреть логи в реальном времени
-journalctl -u news_bot -f
+Всё через дашборд: `railway.com` → проект `divine-love` → сервис `news-bot`
 
-# Перезапустить бота
-systemctl restart news_bot
-
-# Остановить бота
-systemctl stop news_bot
-
-# Посмотреть последние 50 строк логов
-journalctl -u news_bot -n 50
-```
+- **Логи в реальном времени** — вкладка Deployments → активный деплой → View logs
+- **Перезапустить бота** — Deployments → ⋮ на активном деплое → Redeploy
+- **Остановить бота** — Settings → удалить/остановить сервис (или Variables → временно убрать `TELEGRAM_TOKEN`)
+- **Переменные окружения** — вкладка Variables (`TELEGRAM_TOKEN`, `ANTHROPIC_API_KEY`, `ADMIN_ID`)
+- **База данных** — SQLite-файл лежит на примонтированном volume `/data`, переживает редеплои
 
 ---
 
@@ -246,24 +147,40 @@ news_bot/
 ],
 ```
 
-Перезапусти бота: `systemctl restart news_bot`
+Закоммить и запушь в `main` — Railway передеплоит автоматически (см. раздел «Хостинг — Railway»).
 
 ---
+
+## Известная проблема — база стирается при редеплое
+
+**Симптом:** после каждого пуша в `main` (любого, даже не связанного с базой) список одобренных пользователей (мама/папа) и история просмотренных статей пропадают — бот ведёт себя так, будто их никогда не одобряли.
+
+**Причина:** у сервиса `news-bot` на Railway нет примонтированного persistent volume. `news_bot.db` пишется в файловую систему контейнера, а контейнер при каждом редеплое пересоздаётся с нуля — вместе с ним стирается и файл базы. Это не баг в коде, а дыра в инфраструктуре: в истории деплоев Railway видно, что это пытались чинить раньше (`/data/news_bot.db` + создание директории), но volume так и не был реально подключён, поэтому фикс ничего не давал.
+
+**Статус:**
+- `db.py` уже умеет писать базу в `/data/news_bot.db`, если эта директория существует (иначе — локальный файл рядом с кодом).
+- Но пока в Railway → сервис `news-bot` → **Settings → Volumes** не создан volume, примонтированный на `/data`, база всё равно будет жить в контейнере и стираться.
+
+**Что нужно сделать (руками, один раз):**
+1. `railway.com` → проект `divine-love` → сервис `news-bot` → вкладка **Settings** → раздел **Volumes** → **+ New Volume**
+2. Mount path: `/data`
+3. Redeploy сервис
+4. После этого мама и папа должны один раз заново написать `/start` боту — их старое одобрение стёрлось вместе с базой. После повторного одобрения это больше не должно повторяться.
 
 ## Частые проблемы
 
 **Бот не запускается**
-→ Проверь `.env` — все три переменные заполнены?  
-→ `python bot.py` — смотри текст ошибки
+→ Проверь Variables на Railway — все три заполнены (`TELEGRAM_TOKEN`, `ANTHROPIC_API_KEY`, `ADMIN_ID`)?
+→ View logs на активном деплое — смотри текст ошибки
 
 **Нет новостей в дайджесте**
-→ Нормально если несколько минут пусто — новости копятся  
+→ Нормально если несколько минут пусто — новости копятся
 → Попробуй `/digest` вручную
 
 **Один из источников не грузится**
-→ Смотри логи: `journalctl -u news_bot -n 100`  
-→ Этот источник просто пропускается, остальные работают
+→ `/sources` — покажет какой конкретно фид молчит/падает и с какой ошибкой
+→ Такой источник просто пропускается, остальные работают
 
 **Бот упал и не поднимается**
-→ `systemctl status news_bot` — там причина  
-→ `systemctl restart news_bot`
+→ Deployments → View logs — там причина
+→ ⋮ на деплое → Redeploy
