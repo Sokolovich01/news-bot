@@ -5,6 +5,7 @@ from typing import Dict, List
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, Router, F
+from aiogram.exceptions import TelegramRetryAfter, TelegramForbiddenError
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -14,12 +15,14 @@ from config import (
     TELEGRAM_TOKEN, ADMIN_ID,
     DIGEST_INTERVAL_MIN, BREAKING_CHECK_MIN,
     BOT_TIMEZONE, QUIET_START, QUIET_END,
+    SOURCE_FAIL_ALERT_THRESHOLD,
 )
 from db import (
     init_db, is_paused, set_paused, cleanup_old,
     is_initialized, mark_initialized,
     add_user, remove_user, get_active_users, get_active_users_by_lang,
     get_all_users, user_exists, set_user_language, get_user_language,
+    get_source_health,
 )
 from aggregator import fetch_for_digest, fetch_breaking_only, fetch_and_mark_all_silent
 from summarizer import create_split_digests, create_breaking_summary
@@ -47,6 +50,36 @@ def _is_quiet_time() -> bool:
 
 # ── Broadcast helpers ─────────────────────────────────────────────────────────
 
+async def _send_safe(uid: int, text: str, retries: int = 1) -> None:
+    """
+    Send one message with flood-control and blocked-user handling.
+    - TelegramRetryAfter: Telegram tells us exactly how long to back off —
+      sleep that long and retry once. Without this, a single flood-wait
+      during a broadcast silently drops every remaining user in the loop.
+    - TelegramForbiddenError: user blocked the bot or deleted their
+      account — deactivate them so future broadcasts stop wasting a
+      request (and a retry) on a dead chat.
+    """
+    try:
+        await bot.send_message(
+            uid, text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except TelegramRetryAfter as e:
+        if retries <= 0:
+            logger.warning(f"Flood control still active for {uid} after retry, dropping message")
+            return
+        logger.warning(f"Flood control: sleeping {e.retry_after}s before retrying {uid}")
+        await asyncio.sleep(e.retry_after)
+        await _send_safe(uid, text, retries=retries - 1)
+    except TelegramForbiddenError:
+        logger.info(f"User {uid} blocked the bot — deactivating")
+        await remove_user(uid)
+    except Exception as e:
+        logger.warning(f"Failed to send to {uid}: {e}")
+
+
 async def broadcast_many(messages_by_lang: Dict[str, List[str]]):
     """
     Send per-language list of messages to active users.
@@ -62,16 +95,9 @@ async def broadcast_many(messages_by_lang: Dict[str, List[str]]):
             continue
         for uid in uids:
             for i, text in enumerate(messages):
-                try:
-                    await bot.send_message(
-                        uid, text,
-                        parse_mode="HTML",
-                        disable_web_page_preview=True,
-                    )
-                    if i < len(messages) - 1:
-                        await asyncio.sleep(1)
-                except Exception as e:
-                    logger.warning(f"Failed to send to {uid}: {e}")
+                await _send_safe(uid, text)
+                if i < len(messages) - 1:
+                    await asyncio.sleep(1)
 
 
 async def broadcast_one(texts_by_lang: Dict[str, str]):
@@ -82,14 +108,7 @@ async def broadcast_one(texts_by_lang: Dict[str, str]):
         if not text:
             continue
         for uid in uids:
-            try:
-                await bot.send_message(
-                    uid, text,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
-            except Exception as e:
-                logger.warning(f"Failed to send to {uid}: {e}")
+            await _send_safe(uid, text)
 
 
 # ── Scheduled jobs ────────────────────────────────────────────────────────────
@@ -318,7 +337,8 @@ async def cmd_help(msg: Message):
             "/removeuser <code>ID</code> — удалить\n"
             "/pause 2h — пауза для всех\n"
             "/resume — продолжить\n"
-            "/status — статус бота"
+            "/status — статус бота\n"
+            "/sources — здоровье источников"
         )
     await msg.answer(
         "📋 <b>Команды / Команди:</b>\n\n"
@@ -432,9 +452,37 @@ async def cmd_status(msg: Message):
         f"👥 Пользователей: {len(users)}\n"
         f"📋 Дайджест: каждые {DIGEST_INTERVAL_MIN} мин\n"
         f"🚨 Breaking: каждые {BREAKING_CHECK_MIN} мин\n"
-        f"🌙 Тихий режим: 00:00–07:00 (Киев)",
+        f"🌙 Тихий режим: {QUIET_START:02d}:00–{QUIET_END:02d}:00 (Киев)",
         parse_mode="HTML",
     )
+
+
+@router.message(Command("sources"))
+async def cmd_sources(msg: Message):
+    """
+    Health overview of every RSS source: last successful fetch, last
+    error, and a streak counter for "fetched OK but zero new articles".
+    A long empty streak is the giveaway for a feed that died silently
+    (still returns 200, just stopped publishing) — the kind of failure
+    that never shows up in logs as an error. Flags sources past
+    config.SOURCE_FAIL_ALERT_THRESHOLD with ⚠️.
+    """
+    if not is_admin(msg.chat.id): return
+    health = await get_source_health()
+    if not health:
+        await msg.answer("Нет данных — источники ещё не опрашивались")
+        return
+
+    lines = ["🩺 <b>Здоровье источников:</b>\n"]
+    for h in health:
+        flag = "⚠️ " if h["consecutive_empty"] >= SOURCE_FAIL_ALERT_THRESHOLD else ""
+        last_error = f" · ❌ {h['last_error'][:60]}" if h["last_error_at"] else ""
+        lines.append(
+            f"{flag}<b>{h['source']}</b> ({h['category']})\n"
+            f"   статей: {h['total_articles']} / попыток: {h['total_fetches']}"
+            f" · пусто подряд: {h['consecutive_empty']}{last_error}"
+        )
+    await msg.answer("\n".join(lines), parse_mode="HTML")
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
@@ -476,9 +524,9 @@ async def main():
             await bot.send_message(
                 ADMIN_ID,
                 "🤖 <b>Новостной бот запущен!</b>\n\n"
-                f"📋 Дайджест раз в час — по категориям\n"
+                f"📋 Дайджест каждые {DIGEST_INTERVAL_MIN} мин — по категориям\n"
                 f"🚨 Breaking каждые {BREAKING_CHECK_MIN} мин\n"
-                f"🌙 Тихий режим: 00:00–07:00 (Киев)\n\n"
+                f"🌙 Тихий режим: {QUIET_START:02d}:00–{QUIET_END:02d}:00 (Киев)\n\n"
                 "Первый дайджест придёт через час.\n"
                 "/help — команды  |  /lang — язык 🇷🇺🇺🇦",
                 parse_mode="HTML",

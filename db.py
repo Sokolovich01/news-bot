@@ -39,6 +39,18 @@ async def init_db():
             await db.commit()
         except Exception:
             pass  # column already exists
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS source_health (
+                source            TEXT PRIMARY KEY,
+                category          TEXT,
+                last_success_at   TEXT,
+                last_error_at     TEXT,
+                last_error        TEXT,
+                consecutive_empty INTEGER DEFAULT 0,
+                total_fetches     INTEGER DEFAULT 0,
+                total_articles    INTEGER DEFAULT 0
+            )
+        """)
         await db.execute(
             "INSERT OR IGNORE INTO bot_state (key, value) VALUES ('initialized', 'false')"
         )
@@ -203,3 +215,84 @@ async def user_exists(chat_id: int) -> bool:
             "SELECT 1 FROM users WHERE chat_id = ? AND is_active = 1", (chat_id,)
         ) as cur:
             return await cur.fetchone() is not None
+
+
+# ── Source health ────────────────────────────────────────────────────────────
+
+async def record_source_result(
+    source: str, category: str, ok: bool, article_count: int = 0, error: Optional[str] = None
+):
+    """
+    Track per-RSS-source reliability. `ok=False` means the fetch itself threw
+    (network/parse error) — a dead/broken feed. `ok=True, article_count=0` is
+    normal (no new articles this cycle) and does NOT count as a failure, but
+    still increments the "consecutive empty" streak so a feed that's been
+    silent for weeks (likely dead, just not throwing) can also be flagged —
+    see SOURCE_FAIL_ALERT_THRESHOLD / cmd_sources in bot.py.
+    """
+    now = datetime.now().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT consecutive_empty, total_fetches, total_articles FROM source_health WHERE source = ?",
+            (source,),
+        ) as cur:
+            row = await cur.fetchone()
+
+        if row is None:
+            await db.execute(
+                """INSERT INTO source_health
+                       (source, category, last_success_at, last_error_at, last_error,
+                        consecutive_empty, total_fetches, total_articles)
+                   VALUES (?, ?, ?, ?, ?, ?, 1, ?)""",
+                (
+                    source, category,
+                    now if ok else None,
+                    None if ok else now,
+                    None if ok else error,
+                    1 if (ok and article_count == 0) else 0,
+                    article_count,
+                ),
+            )
+        else:
+            prev_empty, prev_fetches, prev_articles = row
+            consecutive_empty = prev_empty + 1 if (ok and article_count == 0) else 0
+            await db.execute(
+                """UPDATE source_health SET
+                       category          = ?,
+                       last_success_at   = CASE WHEN ? THEN ? ELSE last_success_at END,
+                       last_error_at     = CASE WHEN ? THEN ? ELSE last_error_at END,
+                       last_error        = CASE WHEN ? THEN ? ELSE last_error END,
+                       consecutive_empty = ?,
+                       total_fetches     = ?,
+                       total_articles    = ?
+                   WHERE source = ?""",
+                (
+                    category,
+                    ok, now,
+                    not ok, now,
+                    not ok, error,
+                    consecutive_empty,
+                    prev_fetches + 1,
+                    prev_articles + article_count,
+                    source,
+                ),
+            )
+        await db.commit()
+
+
+async def get_source_health() -> List[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """SELECT source, category, last_success_at, last_error_at, last_error,
+                      consecutive_empty, total_fetches, total_articles
+               FROM source_health ORDER BY category, source"""
+        ) as cur:
+            rows = await cur.fetchall()
+    return [
+        {
+            "source": r[0], "category": r[1],
+            "last_success_at": r[2], "last_error_at": r[3], "last_error": r[4],
+            "consecutive_empty": r[5], "total_fetches": r[6], "total_articles": r[7],
+        }
+        for r in rows
+    ]

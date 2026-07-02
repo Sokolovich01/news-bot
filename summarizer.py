@@ -1,10 +1,11 @@
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Dict, List
 
 from anthropic import AsyncAnthropic
-from config import ANTHROPIC_KEY, MIN_ARTICLES_SOLO, CATEGORY_HASHTAGS
+from config import ANTHROPIC_KEY, MIN_ARTICLES_SOLO, CATEGORY_HASHTAGS, DIGEST_LINKS_LIMIT
 
 logger = logging.getLogger(__name__)
 client = AsyncAnthropic(api_key=ANTHROPIC_KEY)
@@ -26,6 +27,26 @@ def _get_hashtags(category_label: str) -> str:
                         tags.append(tag)
                         seen.add(tag)
     return " ".join(tags)
+
+
+def _get_source_links(articles: List[dict], limit: int = DIGEST_LINKS_LIMIT) -> str:
+    """
+    Builds an HTML "🔗 Источники:" footer with clickable links back to the
+    original articles, deduped by URL, capped at `limit` (config.DIGEST_LINKS_LIMIT)
+    so a 12-article digest doesn't turn into a wall of links.
+    """
+    seen_urls = set()
+    lines = []
+    for a in articles:
+        if a["url"] in seen_urls:
+            continue
+        seen_urls.add(a["url"])
+        lines.append(f'<a href="{a["url"]}">{a["source"]}</a>')
+        if len(lines) >= limit:
+            break
+    if not lines:
+        return ""
+    return "🔗 Источники: " + " · ".join(lines)
 
 
 async def _summarize_one(category_label: str, articles: List[dict], lang: str = "ru") -> str:
@@ -62,6 +83,10 @@ async def _summarize_one(category_label: str, articles: List[dict], lang: str = 
         messages=[{"role": "user", "content": prompt}],
     )
     text = resp.content[0].text.strip()
+
+    links = _get_source_links(articles)
+    if links:
+        text += f"\n\n{links}"
 
     hashtags = _get_hashtags(category_label)
     if hashtags:
@@ -114,6 +139,56 @@ async def create_split_digests(
     return messages
 
 
+async def classify_breaking(candidates: List[dict]) -> List[bool]:
+    """
+    Stage 2 of breaking-news detection (see aggregator.fetch_breaking_only).
+    `candidates` already passed the keyword pre-filter in aggregator._is_breaking,
+    which only rules out substring noise — it can't tell a real ongoing event
+    ("missile strike hits city") from an unrelated use of the same word
+    ("stock crash", "war of words", historical retrospective, opinion piece).
+    This does one batched AI call over all candidates and returns which ones
+    are genuinely urgent/breaking, in the same order as the input list.
+    """
+    if not candidates:
+        return []
+
+    lines = [
+        f"{i}. [{c['source']}] {c['title']} — {c['description'][:150]}"
+        for i, c in enumerate(candidates)
+    ]
+
+    prompt = f"""Ти редактор новин. Нижче список заголовків, які пройшли попередній фільтр за ключовими словами (breaking, attack, missile, crash тощо) і МОЖУТЬ бути терміновими новинами.
+
+Визнач, які з них — СПРАВЖНІ термінові/breaking новини: масштабна подія, що сталась ЩОЙНО (атака, вибух, катастрофа, стихійне лихо, різка ескалація війни, смерть відомої особи тощо).
+
+НЕ вважай терміновими: звичайні ринкові/фінансові новини, аналітику, історичні згадки, спекуляції, м'які формулювання ("могло б", "ймовірно"), клікбейт-заголовки без конкретної події.
+
+Заголовки:
+{chr(10).join(lines)}
+
+Відповідай ТІЛЬКИ номерами через кому тих заголовків, які є справжніми терміновими новинами (наприклад: 0, 3). Якщо жоден не підходить — відповідай одним словом "none".
+"""
+
+    try:
+        resp = await client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=100,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = resp.content[0].text.strip().lower()
+    except Exception as e:
+        logger.error(f"classify_breaking AI call failed: {e}")
+        # Fail open: if the AI check itself is unavailable, trust the
+        # keyword filter rather than silently dropping real breaking news.
+        return [True] * len(candidates)
+
+    if "none" in text:
+        return [False] * len(candidates)
+
+    confirmed = {int(tok) for tok in re.findall(r"\d+", text)}
+    return [i in confirmed for i in range(len(candidates))]
+
+
 async def create_breaking_summary(breaking: List[dict], lang: str = "ru") -> str:
     if not breaking:
         return ""
@@ -136,4 +211,10 @@ async def create_breaking_summary(breaking: List[dict], lang: str = "ru") -> str
         max_tokens=300,
         messages=[{"role": "user", "content": prompt}],
     )
-    return resp.content[0].text.strip()
+    text = resp.content[0].text.strip()
+
+    links = _get_source_links(breaking)
+    if links:
+        text += f"\n\n{links}"
+
+    return text

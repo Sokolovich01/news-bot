@@ -11,6 +11,19 @@ DIGEST_INTERVAL_MIN  = 60   # дайджест раз в час
 BREAKING_CHECK_MIN   = 10   # проверка срочных каждые 10 мин
 MIN_ARTICLES_SOLO    = 3    # минимум статей чтобы категория шла отдельным сообщением
 
+# Дедупликация похожих заголовков внутри одной категории (см. aggregator._dedupe_articles).
+# 0.72 подобрано эмпирически: ловит "Х произошло" / "Х: подробности" с разных сайтов,
+# не схлопывает разные события с общими словами.
+DEDUPE_TITLE_SIMILARITY = 0.72
+
+# Сколько ссылок на первоисточники добавлять под каждым дайджест-сообщением
+DIGEST_LINKS_LIMIT = 6
+
+# Источник считается "проблемным" в /sources, если подряд столько раз не отдал
+# ни одной новой статьи (не обязательно ошибка — бывает и пусто, но так проще
+# заметить реально сдохший RSS)
+SOURCE_FAIL_ALERT_THRESHOLD = 20
+
 # Тихий режим: не отправлять ничего с QUIET_START до QUIET_END (по местному времени)
 BOT_TIMEZONE  = "Europe/Kyiv"
 QUIET_START   = 0   # 00:00 — начало тишины
@@ -34,9 +47,22 @@ BREAKING_KEYWORDS = [
     "срочно", "взрыв", "атака", "ракета",
 ]
 
+# Keywords that are routine vocabulary in some categories (e.g. "crash"/
+# "crisis" show up constantly in normal market coverage) — skip the
+# keyword match entirely for these categories so they don't trigger a
+# false "breaking" hit. Real financial breaking news still gets through
+# via the "breaking"/"urgent"/"alert" etc. keywords above, and via the
+# AI second-pass confirmation in aggregator._is_breaking / classify_breaking.
+BREAKING_EXCLUDE_CATEGORIES = {
+    "crash": ["💰 ФИНАНСЫ"],
+    "crisis": ["💰 ФИНАНСЫ"],
+}
+
 SOURCES = {
     "🌍 МИР": [
-        ("Reuters",         "https://feeds.reuters.com/reuters/worldNews"),
+        # Reuters закрыл публичные RSS ещё в 2020 — feeds.reuters.com мёртв,
+        # заменено на Guardian World (живой и стабильный фид)
+        ("Guardian World",  "https://www.theguardian.com/world/rss"),
         ("BBC World",       "http://feeds.bbci.co.uk/news/world/rss.xml"),
         ("AP News",         "https://feeds.apnews.com/rss/world-news"),
         ("Al Jazeera",      "https://www.aljazeera.com/xml/rss/all.xml"),
@@ -69,8 +95,9 @@ SOURCES = {
         ("InsideEVs",       "https://insideevs.com/rss/articles/"),
     ],
     "💰 ФИНАНСЫ": [
-        ("Reuters Business","https://feeds.reuters.com/reuters/businessNews"),
-        ("CNBC",            "https://www.cnbc.com/id/100003114/device/rss/rss.html"),
+        # Reuters Business — тот же мёртвый feeds.reuters.com, заменено на MarketWatch
+        ("MarketWatch",      "http://feeds.marketwatch.com/marketwatch/topstories/"),
+        ("CNBC",             "https://www.cnbc.com/id/100003114/device/rss/rss.html"),
     ],
     "🏙️ КОНОТОП": [
         ("Інша думка", "https://rsshub.app/telegram/channel/inshadumka"),
